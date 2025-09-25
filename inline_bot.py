@@ -8,16 +8,26 @@ import sys
 import platform
 import json
 import random
+import base64
+import inspect
+import asyncio
+import threading
+import re
+from typing import Any, List, Optional
 
 # for close tab.
 from selenium.common.exceptions import NoSuchWindowException
 from selenium.common.exceptions import UnexpectedAlertPresentException
 from selenium.common.exceptions import NoAlertPresentException
 from selenium.common.exceptions import WebDriverException
+from selenium import webdriver
 # for alert 2
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import Select
+try:
+    from selenium.webdriver.support.ui import Select as SeleniumSelect
+except ImportError:  # pragma: no cover - optional dependency
+    SeleniumSelect = None
 from selenium.webdriver.common.by import By
 # for selenium 4
 from selenium.webdriver.chrome.service import Service
@@ -39,6 +49,24 @@ ssl._create_default_https_context = ssl._create_unverified_context
 import argparse
 import chromedriver_autoinstaller
 
+try:
+    import nodriver
+    from nodriver import cdp
+except ImportError:  # pragma: no cover - optional dependency
+    nodriver = None
+    cdp = None
+
+_CHROMEDRIVER_INSTALL_SUPPORTS_VERSION_DIR = "make_version_dir" in inspect.signature(
+    chromedriver_autoinstaller.install
+).parameters
+
+
+def install_chromedriver_binary(webdriver_path):
+    install_kwargs = {"path": webdriver_path}
+    if _CHROMEDRIVER_INSTALL_SUPPORTS_VERSION_DIR:
+        install_kwargs["make_version_dir"] = False
+    chromedriver_autoinstaller.install(**install_kwargs)
+
 CONST_APP_VERSION = "Max inline Bot (2023.08.21)"
 
 CONST_MAXBOT_CONFIG_FILE = 'settings.json'
@@ -46,12 +74,422 @@ CONST_MAXBOT_LAST_URL_FILE = "MAXBOT_LAST_URL.txt"
 CONST_MAXBOT_INT28_FILE = "MAXBOT_INT28_IDLE.txt"
 
 CONST_HOMEPAGE_DEFAULT = "https://inline.app/zh/?language=zh-tw"
+URL_CHROME_DRIVER = "https://chromedriver.chromium.org/downloads"
 
 CONST_CHROME_VERSION_NOT_MATCH_EN="Please download the WebDriver version to match your browser version."
 CONST_CHROME_VERSION_NOT_MATCH_TW="請下載與您瀏覽器相同版本的WebDriver版本，或更新您的瀏覽器版本。"
 
 CONST_WEBDRIVER_TYPE_SELENIUM = "selenium"
 CONST_WEBDRIVER_TYPE_UC = "undetected_chromedriver"
+CONST_WEBDRIVER_TYPE_NODRIVER = "nodriver"
+
+
+class Keys:
+    ENTER = "\r"
+    END = "\uE010"
+
+
+if nodriver is not None:
+
+    class NodriverElement:
+        def __init__(self, session: "NodriverWebDriver", element: "nodriver.Element"):
+            self._session = session
+            self._element = element
+
+        def __bool__(self) -> bool:
+            return self._element is not None
+
+        def __repr__(self) -> str:  # pragma: no cover - debugging helper
+            return f"<NodriverElement tag={self.tag_name}>"
+
+        @property
+        def tag_name(self) -> str:
+            return (self._element.node.node_name or "").lower()
+
+        def click(self) -> None:
+            self._session._run(self._element.click())
+
+        def clear(self) -> None:
+            try:
+                self._session._run(self._element.clear_input())
+            except Exception:
+                self._session._run(
+                    self._element.apply("(elem) => { elem.value = ''; }")
+                )
+
+        def find_element(self, by: str, value: str) -> "NodriverElement":
+            return self._session._find_element(by, value, base=self)
+
+        def find_elements(self, by: str, value: str) -> List["NodriverElement"]:
+            return self._session._find_elements(by, value, base=self)
+
+        def get_attribute(self, name: str) -> Optional[str]:
+            escaped = name.replace("'", "\\'")
+            prop_name = json.dumps(name)
+            script = (
+                "(elem) => {"
+                f"  const attr = elem.getAttribute('{escaped}');"
+                "  if (attr !== null) { return attr; }"
+                f"  const prop = elem[{prop_name}];"
+                "  if (prop === undefined || prop === null) { return null; }"
+                "  return String(prop);"
+                "}"
+            )
+            result = self._session._run(self._element.apply(script))
+            if result is None:
+                return None
+            return str(result)
+
+        def is_selected(self) -> bool:
+            result = self._session._run(
+                self._element.apply(
+                    "(elem) => Boolean(elem.checked ?? elem.selected ?? false)"
+                )
+            )
+            return bool(result)
+
+        @property
+        def text(self) -> str:
+            result = self._session._run(
+                self._element.apply("(elem) => elem.innerText ?? ''")
+            )
+            if result is None:
+                return ""
+            return str(result)
+
+        def send_keys(self, value: Any) -> None:
+            text = self._session._format_keys(value)
+            if text:
+                self._session._run(self._element.send_keys(text))
+
+
+    class NodriverAlert:
+        def __init__(self, session: "NodriverWebDriver"):
+            self._session = session
+
+        def accept(self) -> None:
+            self._session._run(
+                self._session._active_tab.send(
+                    cdp.page.handle_java_script_dialog(accept=True)
+                )
+            )
+
+        def dismiss(self) -> None:
+            self._session._run(
+                self._session._active_tab.send(
+                    cdp.page.handle_java_script_dialog(accept=False)
+                )
+            )
+
+
+    class NodriverSwitchTo:
+        def __init__(self, session: "NodriverWebDriver"):
+            self._session = session
+
+        def window(self, handle: str) -> None:
+            self._session._switch_window(handle)
+
+        def frame(self, frame_reference: NodriverElement) -> None:
+            if not isinstance(frame_reference, NodriverElement):
+                raise TypeError("frame reference must be a NodriverElement")
+            self._session._frame_stack.append(frame_reference)
+
+        def default_content(self) -> None:
+            self._session._frame_stack.clear()
+
+        @property
+        def alert(self) -> NodriverAlert:
+            return NodriverAlert(self._session)
+
+
+    class NodriverSelect:
+        def __init__(self, element: NodriverElement):
+            if element.tag_name != "select":
+                raise ValueError("NodriverSelect only supports <select> elements")
+            self._element = element
+
+        def _dispatch_change(self) -> None:
+            self._element._session._run(
+                self._element._element.apply(
+                    "(elem) => { elem.dispatchEvent(new Event('input', {bubbles: true}));"
+                    " elem.dispatchEvent(new Event('change', {bubbles: true})); }"
+                )
+            )
+
+        def select_by_value(self, value: str) -> None:
+            escaped = value.replace("'", "\\'")
+            script = (
+                "(elem) => {"
+                f"  const options = Array.from(elem.options || []);"
+                f"  const target = options.find(opt => opt.value === '{escaped}');"
+                "  if (target) { elem.value = target.value; return true; }"
+                "  return false;"
+                "}"
+            )
+            success = self._element._session._run(
+                self._element._element.apply(script)
+            )
+            if not success:
+                raise NoSuchElementException(
+                    f"Cannot locate option with value: {value}"
+                )
+            self._dispatch_change()
+
+        def select_by_visible_text(self, text: str) -> None:
+            escaped = text.replace("'", "\\'")
+            script = (
+                "(elem) => {"
+                "  const options = Array.from(elem.options || []);"
+                f"  const target = options.find(opt => (opt.textContent || '').trim() === '{escaped}');"
+                "  if (target) { elem.value = target.value; return true; }"
+                "  return false;"
+                "}"
+            )
+            success = self._element._session._run(
+                self._element._element.apply(script)
+            )
+            if not success:
+                raise NoSuchElementException(
+                    f"Cannot locate option with text: {text}"
+                )
+            self._dispatch_change()
+
+
+    class NodriverWebDriver:
+        def __init__(self, config_dict: dict):
+            if nodriver is None:
+                raise RuntimeError("nodriver is not installed")
+
+            self._config = config_dict
+            self._loop = asyncio.new_event_loop()
+            self._loop_thread = threading.Thread(
+                target=self._loop.run_forever, daemon=True
+            )
+            self._loop_thread.start()
+            self._frame_stack: List[NodriverElement] = []
+            self._script_timeout = None
+            self.switch_to = NodriverSwitchTo(self)
+
+            browser_args = self._build_browser_args()
+            headless = bool(config_dict.get("advanced", {}).get("headless", False))
+            browser_path = None
+            if config_dict.get("browser") == "brave":
+                brave_path = get_brave_bin_path()
+                if os.path.exists(brave_path):
+                    browser_path = brave_path
+
+            lang = "zh-TW"
+            try:
+                lang = config_dict.get("language", "zh-TW")
+            except Exception:
+                pass
+
+            self._browser = self._run(
+                nodriver.start(
+                    headless=headless,
+                    browser_executable_path=browser_path,
+                    browser_args=browser_args,
+                    lang=lang,
+                )
+            )
+            self._active_tab = self._browser.main_tab
+            self._handles: List[str] = []
+            self._refresh_handles()
+
+        # ------------------------------------------------------------------
+        # helpers
+        # ------------------------------------------------------------------
+        def _run(self, coro: "asyncio.Future"):
+            future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+            return future.result()
+
+        def _build_browser_args(self) -> List[str]:
+            args = [
+                "--disable-features=TranslateUI",
+                "--disable-translate",
+                "--disable-web-security",
+                "--no-sandbox",
+                "--password-store=basic",
+            ]
+            if not self._config.get("advanced", {}).get("headless", False):
+                args.append("--start-maximized")
+            return args
+
+        def _refresh_handles(self) -> None:
+            self._handles = []
+            for tab in self._browser.tabs:
+                if tab.target:
+                    self._handles.append(tab.target.target_id)
+            if self._active_tab and self._active_tab.target:
+                active_handle = self._active_tab.target.target_id
+                if active_handle not in self._handles and self._handles:
+                    self._switch_window(self._handles[0])
+
+        def _switch_window(self, handle: str) -> None:
+            for tab in self._browser.tabs:
+                if tab.target and tab.target.target_id == handle:
+                    self._active_tab = tab
+                    self._frame_stack.clear()
+                    return
+            raise NoSuchWindowException(f"No window with handle {handle}")
+
+        def _current_context(self, base: Optional[NodriverElement] = None):
+            if base is not None:
+                return base._element
+            if self._frame_stack:
+                return self._frame_stack[-1]._element
+            return None
+
+        def _selector_from(self, by: str, value: str) -> str:
+            if by == By.ID:
+                return f"#{value}"
+            if by == By.CSS_SELECTOR:
+                return value
+            if by == By.NAME:
+                return f"[name='{value}']"
+            if by == By.CLASS_NAME:
+                classes = ".".join(part for part in value.split() if part)
+                return f".{classes}" if classes else value
+            if by == By.TAG_NAME:
+                return value
+            if by == By.XPATH:
+                return self._convert_xpath(value)
+            raise NotImplementedError(f"By strategy {by} is not supported in nodriver mode")
+
+        def _convert_xpath(self, xpath: str) -> str:
+            pattern = r"//(?P<tag>\w+)\[@(?P<attr>[\w:-]+)='(?P<value>[^']*)'\](?P<suffix>/.*)?"
+            match = re.fullmatch(pattern, xpath)
+            if not match:
+                raise NotImplementedError(f"Unsupported XPath in nodriver mode: {xpath}")
+            selector = f"{match.group('tag')}[{match.group('attr')}='{match.group('value')}']"
+            suffix = match.group("suffix")
+            if suffix:
+                suffix = suffix.lstrip("/")
+                if suffix:
+                    selector += " " + " ".join(filter(None, suffix.split("/")))
+            return selector
+
+        def _query_selector(self, selector: str, base: Optional[NodriverElement] = None):
+            context = self._current_context(base)
+            if context is not None:
+                return context.query_selector(selector)
+            return self._active_tab.query_selector(selector)
+
+        def _query_selector_all(self, selector: str, base: Optional[NodriverElement] = None):
+            context = self._current_context(base)
+            if context is not None:
+                return context.query_selector_all(selector)
+            return self._active_tab.query_selector_all(selector)
+
+        def _find_element(
+            self, by: str, value: str, base: Optional[NodriverElement] = None
+        ) -> NodriverElement:
+            selector = self._selector_from(by, value)
+            element = self._run(self._query_selector(selector, base))
+            if not element:
+                raise NoSuchElementException(
+                    f"Element not found using {by} with value {value}"
+                )
+            return NodriverElement(self, element)
+
+        def _find_elements(
+            self, by: str, value: str, base: Optional[NodriverElement] = None
+        ) -> List[NodriverElement]:
+            selector = self._selector_from(by, value)
+            elements = self._run(self._query_selector_all(selector, base)) or []
+            return [NodriverElement(self, item) for item in elements]
+
+        def _format_keys(self, value: Any) -> str:
+            if isinstance(value, str):
+                return value
+            if value == Keys.ENTER:
+                return "\r"
+            if value == Keys.END:
+                return "\uE010"
+            if isinstance(value, (list, tuple)):
+                return "".join(self._format_keys(v) for v in value)
+            return str(value)
+
+        # ------------------------------------------------------------------
+        # WebDriver compatible API
+        # ------------------------------------------------------------------
+        def get(self, url: str) -> None:
+            self._run(self._active_tab.get(url))
+            self._refresh_handles()
+
+        def find_element(self, by: str, value: str) -> NodriverElement:
+            return self._find_element(by, value)
+
+        def find_elements(self, by: str, value: str) -> List[NodriverElement]:
+            return self._find_elements(by, value)
+
+        def execute_script(self, script: str, *args: Any) -> Any:
+            if args and isinstance(args[0], NodriverElement):
+                target = args[0]
+                body = script.replace("arguments[0]", "elem")
+                body = body.strip()
+                if not (body.startswith("return") or body.startswith("(") or body.startswith("elem") or body.startswith("{")):
+                    body = f"{{ {body} }}"
+                return self._run(
+                    target._element.apply(f"(elem) => {body}")
+                )
+            return self._run(self._active_tab.evaluate(script, return_by_value=True))
+
+        @property
+        def window_handles(self) -> List[str]:
+            self._refresh_handles()
+            return list(self._handles)
+
+        @property
+        def current_window_handle(self) -> Optional[str]:
+            if self._active_tab and self._active_tab.target:
+                return self._active_tab.target.target_id
+            return None
+
+        @property
+        def current_url(self) -> str:
+            if self._active_tab and self._active_tab.target:
+                return self._active_tab.target.url or ""
+            return ""
+
+        def close(self) -> None:
+            if self._active_tab:
+                self._run(self._active_tab.close())
+            self._refresh_handles()
+            if self._handles:
+                self._switch_window(self._handles[0])
+
+        def quit(self) -> None:
+            try:
+                if self._browser:
+                    self._browser.stop()
+            finally:
+                if self._loop.is_running():
+                    self._loop.call_soon_threadsafe(self._loop.stop)
+                self._loop_thread.join(timeout=1)
+
+        def set_script_timeout(self, timeout: Any) -> None:
+            self._script_timeout = timeout
+
+        def get_log(self, *_args: Any, **_kwargs: Any) -> List[Any]:
+            return []
+
+
+else:
+
+    NodriverElement = None
+    NodriverAlert = None
+    NodriverSwitchTo = None
+    NodriverSelect = None
+    NodriverWebDriver = None
+
+
+def Select(element):
+    if NodriverElement is not None and isinstance(element, NodriverElement):
+        return NodriverSelect(element)
+    if SeleniumSelect is None:
+        raise RuntimeError("Selenium Select is unavailable")
+    return SeleniumSelect(element)
 
 
 def t_or_f(arg):
@@ -213,7 +651,7 @@ def load_chromdriver_normal(config_dict, driver_type):
 
     if not os.path.exists(chromedriver_path):
         print("WebDriver not exist, try to download to:", webdriver_path)
-        chromedriver_autoinstaller.install(path=webdriver_path, make_version_dir=False)
+        install_chromedriver_binary(webdriver_path)
 
     if not os.path.exists(chromedriver_path):
         print("Please download chromedriver and extract zip to webdriver folder from this url:")
@@ -245,7 +683,7 @@ def load_chromdriver_normal(config_dict, driver_type):
                     print(exc2)
                     pass
 
-                chromedriver_autoinstaller.install(path=webdriver_path, make_version_dir=False)
+                install_chromedriver_binary(webdriver_path)
                 chrome_service = Service(chromedriver_path)
                 try:
                     chrome_options = get_chrome_options(webdriver_path, config_dict["advanced"]["adblock_plus_enable"], browser=config_dict["browser"], headless=config_dict["advanced"]["headless"])
@@ -369,7 +807,7 @@ def load_chromdriver_uc(config_dict):
 
     if not os.path.exists(chromedriver_path):
         print("ChromeDriver not exist, try to download to:", webdriver_path)
-        chromedriver_autoinstaller.install(path=webdriver_path, make_version_dir=False)
+        install_chromedriver_binary(webdriver_path)
     else:
         print("ChromeDriver exist:", chromedriver_path)
 
@@ -402,7 +840,7 @@ def load_chromdriver_uc(config_dict):
                 print(exc2)
                 pass
 
-            chromedriver_autoinstaller.install(path=webdriver_path, make_version_dir=False)
+            install_chromedriver_binary(webdriver_path)
             try:
                 options = get_uc_options(uc, config_dict, webdriver_path)
                 driver = uc.Chrome(driver_executable_path=chromedriver_path, options=options, headless=config_dict["advanced"]["headless"])
@@ -497,10 +935,10 @@ def get_driver_by_config(config_dict):
     print("platform.system().lower():", platform.system().lower())
 
     if config_dict["browser"] in ["chrome","brave"]:
-        # method 6: Selenium Stealth
-        if config_dict["webdriver_type"] != CONST_WEBDRIVER_TYPE_UC:
-            driver = load_chromdriver_normal(config_dict, config_dict["webdriver_type"])
-        else:
+        driver_type = config_dict.get("webdriver_type", CONST_WEBDRIVER_TYPE_SELENIUM)
+        if driver_type == CONST_WEBDRIVER_TYPE_NODRIVER:
+            driver = load_nodriver(config_dict)
+        elif driver_type == CONST_WEBDRIVER_TYPE_UC:
             # method 5: uc
             # multiprocessing not work bug.
             if platform.system().lower()=="windows":
@@ -508,6 +946,9 @@ def get_driver_by_config(config_dict):
                     from multiprocessing import freeze_support
                     freeze_support()
             driver = load_chromdriver_uc(config_dict)
+        else:
+            # method 6: Selenium Stealth
+            driver = load_chromdriver_normal(config_dict, driver_type)
 
     if config_dict["browser"] == "firefox":
         # default os is linux/mac
@@ -596,6 +1037,12 @@ def get_driver_by_config(config_dict):
             pass
 
     return driver
+
+
+def load_nodriver(config_dict):
+    if NodriverWebDriver is None:
+        raise RuntimeError("nodriver is required but is not available")
+    return NodriverWebDriver(config_dict)
 
 def is_House_Rules_poped(driver):
     ret = False

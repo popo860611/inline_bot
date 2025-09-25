@@ -4,6 +4,7 @@ cryptography
 idna
 selenium>=4.0.0
 undetected-chromedriver
+nodriver
 urllib3>=1.21.1
 
 # PS: chromedriver_autoinstaller, please use max fork version.
