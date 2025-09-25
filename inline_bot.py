@@ -29,6 +29,7 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     SeleniumSelect = None
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.action_chains import ActionChains
 # for selenium 4
 from selenium.webdriver.chrome.service import Service
 # for wait #1
@@ -52,9 +53,19 @@ import chromedriver_autoinstaller
 try:
     import nodriver
     from nodriver import cdp
+
+    try:  # pragma: no cover - optional dependency
+        from nodriver.core import element as nodriver_core_element
+        from nodriver.core import util as nodriver_util
+    except Exception:  # pragma: no cover - defensive fallback
+        nodriver_core_element = None
+        nodriver_util = None
 except ImportError:  # pragma: no cover - optional dependency
     nodriver = None
     cdp = None
+    nodriver_core_element = None
+    nodriver_util = None
+
 
 _CHROMEDRIVER_INSTALL_SUPPORTS_VERSION_DIR = "make_version_dir" in inspect.signature(
     chromedriver_autoinstaller.install
@@ -147,6 +158,80 @@ if nodriver is not None:
                 )
             )
             return bool(result)
+
+
+        def is_displayed(self) -> bool:
+            script = """
+                (elem) => {
+                  if (!elem || !(elem instanceof Element)) {
+                    return false;
+                  }
+                  if (elem.hasAttribute && elem.hasAttribute('hidden')) {
+                    return false;
+                  }
+                  const style = window.getComputedStyle(elem);
+                  if (!style) {
+                    return false;
+                  }
+                  if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') {
+                    return false;
+                  }
+                  if (style.pointerEvents === 'none') {
+                    return false;
+                  }
+                  const rect = elem.getBoundingClientRect();
+                  const hasSize = rect && (rect.width !== 0 || rect.height !== 0);
+                  if (!hasSize && elem.getClientRects().length === 0) {
+                    return false;
+                  }
+                  const ariaHidden = elem.getAttribute && elem.getAttribute('aria-hidden');
+                  if (ariaHidden && ariaHidden.toLowerCase() === 'true') {
+                    return false;
+                  }
+                  let current = elem;
+                  while (current) {
+                    if (current.hasAttribute && current.hasAttribute('hidden')) {
+                      return false;
+                    }
+                    const root = current.getRootNode && current.getRootNode();
+                    current = current.parentElement || (root && root.host) || null;
+                  }
+                  return true;
+                }
+            """
+            result = self._session._run(self._element.apply(script))
+            return bool(result)
+
+        def is_enabled(self) -> bool:
+            script = """
+                (elem) => {
+                  if (!elem || !(elem instanceof Element)) {
+                    return false;
+                  }
+                  if (elem.disabled) {
+                    return false;
+                  }
+                  if (elem.hasAttribute && elem.hasAttribute('disabled')) {
+                    return false;
+                  }
+                  const ariaDisabled = elem.getAttribute && elem.getAttribute('aria-disabled');
+                  if (ariaDisabled && ariaDisabled.toLowerCase() === 'true') {
+                    return false;
+                  }
+                  const fieldset = elem.closest ? elem.closest('fieldset') : null;
+                  if (fieldset && fieldset.disabled) {
+                    return false;
+                  }
+                  const style = window.getComputedStyle(elem);
+                  if (style && style.pointerEvents === 'none') {
+                    return false;
+                  }
+                  return true;
+                }
+            """
+            result = self._session._run(self._element.apply(script))
+            return bool(result)
+
 
         @property
         def text(self) -> str:
@@ -369,17 +454,27 @@ if nodriver is not None:
                     selector += " " + " ".join(filter(None, suffix.split("/")))
             return selector
 
-        def _query_selector(self, selector: str, base: Optional[NodriverElement] = None):
-            context = self._current_context(base)
-            if context is not None:
-                return context.query_selector(selector)
-            return self._active_tab.query_selector(selector)
 
-        def _query_selector_all(self, selector: str, base: Optional[NodriverElement] = None):
+        async def _query_selector(self, selector: str, base: Optional[NodriverElement] = None):
             context = self._current_context(base)
             if context is not None:
-                return context.query_selector_all(selector)
-            return self._active_tab.query_selector_all(selector)
+                result = await context.query_selector(selector)
+            else:
+                result = await self._active_tab.query_selector(selector)
+            if result is not None:
+                return result
+            return await self._query_selector_shadow(selector, base)
+
+        async def _query_selector_all(self, selector: str, base: Optional[NodriverElement] = None):
+            context = self._current_context(base)
+            if context is not None:
+                result = await context.query_selector_all(selector)
+            else:
+                result = await self._active_tab.query_selector_all(selector)
+            if result:
+                return result
+            return await self._query_selector_all_shadow(selector, base)
+
 
         def _find_element(
             self, by: str, value: str, base: Optional[NodriverElement] = None
@@ -399,6 +494,91 @@ if nodriver is not None:
             elements = self._run(self._query_selector_all(selector, base)) or []
             return [NodriverElement(self, item) for item in elements]
 
+
+        async def _query_selector_shadow(
+            self, selector: str, base: Optional[NodriverElement] = None
+        ):
+            matches = await self._query_selector_all_shadow(
+                selector, base, first_only=True
+            )
+            if matches:
+                return matches[0]
+            return None
+
+        async def _query_selector_all_shadow(
+            self,
+            selector: str,
+            base: Optional[NodriverElement] = None,
+            first_only: bool = False,
+        ):
+            if nodriver_core_element is None or nodriver_util is None:
+                return []
+            doc = await self._active_tab.send(cdp.dom.get_document(-1, True))
+            try:
+                search_id, result_count = await self._active_tab.send(
+                    cdp.dom.perform_search(
+                        selector, include_user_agent_shadow_dom=True
+                    )
+                )
+            except Exception:
+                return []
+            collected: List[Any] = []
+            base_node_id = None
+            if base is not None and isinstance(base, NodriverElement):
+                base_node_id = getattr(base._element.node, "node_id", None)
+            fetched = 0
+            try:
+                while fetched < result_count:
+                    end = min(result_count, fetched + 20)
+                    try:
+                        node_ids = await self._active_tab.send(
+                            cdp.dom.get_search_results(search_id, fetched, end)
+                        )
+                    except Exception:
+                        break
+                    fetched = end
+                    for node_id in node_ids or []:
+                        if base_node_id is not None and not self._node_is_descendant(
+                            doc, base_node_id, node_id
+                        ):
+                            continue
+                        node = nodriver_util.filter_recurse(
+                            doc, lambda item, target=node_id: item.node_id == target
+                        )
+                        if not node:
+                            continue
+                        collected.append(
+                            nodriver_core_element.create(node, self._active_tab, doc)
+                        )
+                        if first_only and collected:
+                            return collected
+                return collected
+            finally:
+                try:
+                    await self._active_tab.send(
+                        cdp.dom.discard_search_results(search_id)
+                    )
+                except Exception:
+                    pass
+
+        def _node_is_descendant(
+            self, doc: Any, ancestor_id: Any, candidate_id: Any
+        ) -> bool:
+            if nodriver_util is None:
+                return False
+            ancestor = nodriver_util.filter_recurse(
+                doc, lambda item, target=ancestor_id: item.node_id == target
+            )
+            if not ancestor:
+                return False
+            if ancestor.node_id == candidate_id:
+                return True
+            descendant = nodriver_util.filter_recurse(
+                ancestor, lambda item, target=candidate_id: item.node_id == target
+            )
+            return descendant is not None
+
+
         def _format_keys(self, value: Any) -> str:
             if isinstance(value, str):
                 return value
@@ -409,6 +589,59 @@ if nodriver is not None:
             if isinstance(value, (list, tuple)):
                 return "".join(self._format_keys(v) for v in value)
             return str(value)
+
+
+        def _press_and_hold(self, element: NodriverElement, seconds: float) -> None:
+            self._run(self._press_and_hold_async(element, seconds))
+
+        async def _press_and_hold_async(
+            self, element: NodriverElement, seconds: float
+        ) -> None:
+            await element._element.scroll_into_view()
+            coords = await element._element.apply(
+                "(elem) => {"
+                "  const rect = elem.getBoundingClientRect();"
+                "  return {"
+                "    x: rect.left + (rect.width / 2),"
+                "    y: rect.top + (rect.height / 2)"
+                "  };"
+                "}"
+            )
+            if not isinstance(coords, dict):
+                raise RuntimeError("Unable to resolve element coordinates")
+            x = float(coords.get("x", 0))
+            y = float(coords.get("y", 0))
+            await self._active_tab.send(
+                cdp.input_.dispatch_mouse_event(
+                    type_="mouseMoved",
+                    x=x,
+                    y=y,
+                    button=cdp.input_.MouseButton.NONE,
+                    buttons=0,
+                )
+            )
+            await self._active_tab.send(
+                cdp.input_.dispatch_mouse_event(
+                    type_="mousePressed",
+                    x=x,
+                    y=y,
+                    button=cdp.input_.MouseButton.LEFT,
+                    buttons=1,
+                )
+            )
+            try:
+                await asyncio.sleep(max(seconds, 0.2))
+            finally:
+                await self._active_tab.send(
+                    cdp.input_.dispatch_mouse_event(
+                        type_="mouseReleased",
+                        x=x,
+                        y=y,
+                        button=cdp.input_.MouseButton.LEFT,
+                        buttons=0,
+                    )
+                )
+
 
         # ------------------------------------------------------------------
         # WebDriver compatible API
@@ -516,6 +749,72 @@ def encryptMe(s):
     if(len(s)>0):
         data=base64.b64encode(sx(s).encode('UTF-8')).decode("UTF-8")
     return data
+
+
+def _perform_press_and_hold(driver, element, hold_seconds: float) -> None:
+    hold_seconds = max(float(hold_seconds), 0.2)
+    if NodriverElement is not None and isinstance(element, NodriverElement):
+        driver._press_and_hold(element, hold_seconds)
+        return
+
+    actions = ActionChains(driver)
+    actions.click_and_hold(element).pause(hold_seconds).release().perform()
+
+
+def solve_press_and_hold_if_needed(driver, hold_seconds: float = 5.0) -> bool:
+    try:
+        script = """
+            (() => {
+              const markers = [
+                '按住不放',
+                '按著不放',
+                '按住確認',
+                '按住以確認',
+                'Press and hold',
+                'Hold to verify'
+              ];
+              const candidates = Array.from(document.querySelectorAll('button, [role="button"]'));
+              for (const el of document.querySelectorAll('[data-maxbot-press-hold]')) {
+                el.removeAttribute('data-maxbot-press-hold');
+              }
+              for (const el of candidates) {
+                const label = (el.innerText || el.textContent || '').trim();
+                if (!label) {
+                  continue;
+                }
+                if (markers.some((word) => label.includes(word))) {
+                  el.setAttribute('data-maxbot-press-hold', 'true');
+                  return true;
+                }
+              }
+              return false;
+            })()
+        """
+        found = driver.execute_script(script)
+    except Exception:
+        return False
+
+    if not found:
+        return False
+
+    try:
+        element = driver.find_element(
+            By.CSS_SELECTOR, "[data-maxbot-press-hold='true']"
+        )
+    except Exception:
+        return False
+
+    try:
+        _perform_press_and_hold(driver, element, hold_seconds)
+        cleanup_script = """
+            const el = document.querySelector("[data-maxbot-press-hold='true']");
+            if (el) { el.removeAttribute('data-maxbot-press-hold'); }
+        """
+        driver.execute_script(cleanup_script)
+        return True
+    except Exception:
+        return False
+
 
 def get_app_root():
     # 讀取檔案裡的參數值
@@ -1961,6 +2260,11 @@ def main(args):
             break
 
         url, is_quit_bot = get_current_url(driver)
+        try:
+            if solve_press_and_hold_if_needed(driver):
+                time.sleep(0.5)
+        except Exception:
+            pass
         if is_quit_bot:
             break
 
