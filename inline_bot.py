@@ -20,7 +20,9 @@ from selenium.common.exceptions import NoSuchWindowException
 from selenium.common.exceptions import UnexpectedAlertPresentException
 from selenium.common.exceptions import NoAlertPresentException
 from selenium.common.exceptions import WebDriverException
+
 from selenium.common.exceptions import NoSuchElementException
+
 from selenium import webdriver
 # for alert 2
 from selenium.webdriver.support.ui import WebDriverWait
@@ -51,6 +53,7 @@ ssl._create_default_https_context = ssl._create_unverified_context
 import argparse
 import chromedriver_autoinstaller
 
+
 try:  # pragma: no cover - optional dependency
     from DrissionPage import ChromiumOptions, ChromiumPage
     from DrissionPage._elements.chromium_element import (
@@ -66,6 +69,7 @@ except Exception:  # pragma: no cover - optional dependency
 try:
     import nodriver
     from nodriver import cdp
+
     try:  # pragma: no cover - optional dependency
         from nodriver.core import element as nodriver_core_element
         from nodriver.core import util as nodriver_util
@@ -77,6 +81,7 @@ except ImportError:  # pragma: no cover - optional dependency
     cdp = None
     nodriver_core_element = None
     nodriver_util = None
+
 
 _CHROMEDRIVER_INSTALL_SUPPORTS_VERSION_DIR = "make_version_dir" in inspect.signature(
     chromedriver_autoinstaller.install
@@ -104,7 +109,9 @@ CONST_CHROME_VERSION_NOT_MATCH_TW="請下載與您瀏覽器相同版本的WebDri
 CONST_WEBDRIVER_TYPE_SELENIUM = "selenium"
 CONST_WEBDRIVER_TYPE_UC = "undetected_chromedriver"
 CONST_WEBDRIVER_TYPE_NODRIVER = "nodriver"
+
 CONST_WEBDRIVER_TYPE_DRISSION = "drissionpage"
+
 
 
 class Keys:
@@ -170,6 +177,7 @@ if nodriver is not None:
                 )
             )
             return bool(result)
+
 
         def is_displayed(self) -> bool:
             script = """
@@ -242,6 +250,7 @@ if nodriver is not None:
             """
             result = self._session._run(self._element.apply(script))
             return bool(result)
+
 
         @property
         def text(self) -> str:
@@ -464,6 +473,7 @@ if nodriver is not None:
                     selector += " " + " ".join(filter(None, suffix.split("/")))
             return selector
 
+
         async def _query_selector(self, selector: str, base: Optional[NodriverElement] = None):
             context = self._current_context(base)
             if context is not None:
@@ -484,6 +494,7 @@ if nodriver is not None:
                 return result
             return await self._query_selector_all_shadow(selector, base)
 
+
         def _find_element(
             self, by: str, value: str, base: Optional[NodriverElement] = None
         ) -> NodriverElement:
@@ -501,6 +512,7 @@ if nodriver is not None:
             selector = self._selector_from(by, value)
             elements = self._run(self._query_selector_all(selector, base)) or []
             return [NodriverElement(self, item) for item in elements]
+
 
         async def _query_selector_shadow(
             self, selector: str, base: Optional[NodriverElement] = None
@@ -585,6 +597,7 @@ if nodriver is not None:
             )
             return descendant is not None
 
+
         def _format_keys(self, value: Any) -> str:
             if isinstance(value, str):
                 return value
@@ -595,6 +608,7 @@ if nodriver is not None:
             if isinstance(value, (list, tuple)):
                 return "".join(self._format_keys(v) for v in value)
             return str(value)
+
 
         def _press_and_hold(self, element: NodriverElement, seconds: float) -> None:
             self._run(self._press_and_hold_async(element, seconds))
@@ -646,6 +660,7 @@ if nodriver is not None:
                         buttons=0,
                     )
                 )
+
 
         # ------------------------------------------------------------------
         # WebDriver compatible API
@@ -719,6 +734,7 @@ else:
     NodriverSwitchTo = None
     NodriverSelect = None
     NodriverWebDriver = None
+
 
 
 if ChromiumPage is not None:
@@ -1218,6 +1234,7 @@ def Select(element):
         return NodriverSelect(element)
     if DrissionElement is not None and isinstance(element, DrissionElement):
         return DrissionSelect(element)
+
     if SeleniumSelect is None:
         raise RuntimeError("Selenium Select is unavailable")
     return SeleniumSelect(element)
@@ -1254,15 +1271,18 @@ def _perform_press_and_hold(driver, element, hold_seconds: float) -> None:
     if NodriverElement is not None and isinstance(element, NodriverElement):
         driver._press_and_hold(element, hold_seconds)
         return
+
     if DrissionElement is not None and isinstance(element, DrissionElement):
         driver._press_and_hold(element, hold_seconds)
         return
+
 
     actions = ActionChains(driver)
     actions.click_and_hold(element).pause(hold_seconds).release().perform()
 
 
 def solve_press_and_hold_if_needed(driver, hold_seconds: float = 5.0) -> bool:
+
     if driver is None:
         return False
 
@@ -1391,6 +1411,7 @@ def solve_press_and_hold_if_needed(driver, hold_seconds: float = 5.0) -> bool:
                 pass
 
     return False
+
 
 
 def get_app_root():
@@ -1814,8 +1835,10 @@ def get_driver_by_config(config_dict):
         driver_type = config_dict.get("webdriver_type", CONST_WEBDRIVER_TYPE_SELENIUM)
         if driver_type == CONST_WEBDRIVER_TYPE_NODRIVER:
             driver = load_nodriver(config_dict)
+
         elif driver_type == CONST_WEBDRIVER_TYPE_DRISSION:
             driver = load_drissionpage(config_dict)
+
         elif driver_type == CONST_WEBDRIVER_TYPE_UC:
             # method 5: uc
             # multiprocessing not work bug.
@@ -1923,10 +1946,12 @@ def load_nodriver(config_dict):
     return NodriverWebDriver(config_dict)
 
 
+
 def load_drissionpage(config_dict):
     if DrissionWebDriver is None:
         raise RuntimeError("DrissionPage is required but is not available")
     return DrissionWebDriver(config_dict)
+
 
 def is_House_Rules_poped(driver):
     ret = False
