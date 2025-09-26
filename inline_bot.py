@@ -53,6 +53,19 @@ ssl._create_default_https_context = ssl._create_unverified_context
 import argparse
 import chromedriver_autoinstaller
 
+
+try:  # pragma: no cover - optional dependency
+    from DrissionPage import ChromiumOptions, ChromiumPage
+    from DrissionPage._elements.chromium_element import (
+        ChromiumElement as _ChromiumElement,
+    )
+    from DrissionPage._pages.chromium_frame import ChromiumFrame as _ChromiumFrame
+except Exception:  # pragma: no cover - optional dependency
+    ChromiumOptions = None
+    ChromiumPage = None
+    _ChromiumElement = None
+    _ChromiumFrame = None
+
 try:
     import nodriver
     from nodriver import cdp
@@ -96,6 +109,9 @@ CONST_CHROME_VERSION_NOT_MATCH_TW="請下載與您瀏覽器相同版本的WebDri
 CONST_WEBDRIVER_TYPE_SELENIUM = "selenium"
 CONST_WEBDRIVER_TYPE_UC = "undetected_chromedriver"
 CONST_WEBDRIVER_TYPE_NODRIVER = "nodriver"
+
+CONST_WEBDRIVER_TYPE_DRISSION = "drissionpage"
+
 
 
 class Keys:
@@ -720,9 +736,505 @@ else:
     NodriverWebDriver = None
 
 
+
+if ChromiumPage is not None:
+
+    class DrissionElement:
+        def __init__(self, driver: "DrissionWebDriver", element: "_ChromiumElement"):
+            self._driver = driver
+            self._element = element
+
+        def __bool__(self) -> bool:
+            return self._element is not None
+
+        def click(self) -> None:
+            self._element.click()
+
+        def clear(self) -> None:
+            try:
+                self._element.clear()
+            except Exception:
+                self._driver.execute_script(
+                    "arguments[0].value = '';"
+                    "arguments[0].dispatchEvent(new Event('input', {bubbles: true}));"
+                    "arguments[0].dispatchEvent(new Event('change', {bubbles: true}));",
+                    self,
+                )
+
+        def find_element(self, by: str, value: str) -> "DrissionElement":
+            return self._driver._find_element(by, value, base=self)
+
+        def find_elements(self, by: str, value: str) -> List["DrissionElement"]:
+            return self._driver._find_elements(by, value, base=self)
+
+        def get_attribute(self, name: str) -> Optional[str]:
+            try:
+                value = self._element.attr(name)
+            except Exception:
+                value = None
+            if value is not None:
+                return str(value)
+            script = (
+                "return (function(elem, prop) {"
+                "  if (!elem) { return null; }"
+                "  const attr = elem.getAttribute(prop);"
+                "  if (attr !== null) { return attr; }"
+                "  const val = elem[prop];"
+                "  if (val === undefined || val === null) { return null; }"
+                "  return String(val);"
+                "})(arguments[0], arguments[1]);"
+            )
+            result = self._driver.execute_script(script, self, name)
+            if result is None:
+                return None
+            return str(result)
+
+        def is_selected(self) -> bool:
+            script = (
+                "return (function(elem) {"
+                "  if (!elem) { return false; }"
+                "  return Boolean(elem.checked ?? elem.selected ?? false);"
+                "})(arguments[0]);"
+            )
+            return bool(self._driver.execute_script(script, self))
+
+        def is_displayed(self) -> bool:
+            script = """
+                return (function(elem) {
+                  if (!elem || !(elem instanceof Element)) {
+                    return false;
+                  }
+                  if (elem.hasAttribute && elem.hasAttribute('hidden')) {
+                    return false;
+                  }
+                  const style = window.getComputedStyle(elem);
+                  if (!style) {
+                    return false;
+                  }
+                  if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') {
+                    return false;
+                  }
+                  if (style.pointerEvents === 'none') {
+                    return false;
+                  }
+                  const rect = elem.getBoundingClientRect();
+                  const hasSize = rect && (rect.width !== 0 || rect.height !== 0);
+                  if (!hasSize && elem.getClientRects().length === 0) {
+                    return false;
+                  }
+                  const ariaHidden = elem.getAttribute && elem.getAttribute('aria-hidden');
+                  if (ariaHidden && ariaHidden.toLowerCase() === 'true') {
+                    return false;
+                  }
+                  let current = elem;
+                  while (current) {
+                    if (current.hasAttribute && current.hasAttribute('hidden')) {
+                      return false;
+                    }
+                    const root = current.getRootNode && current.getRootNode();
+                    current = current.parentElement || (root && root.host) || null;
+                  }
+                  return true;
+                })(arguments[0]);
+            """
+            return bool(self._driver.execute_script(script, self))
+
+        def is_enabled(self) -> bool:
+            script = """
+                return (function(elem) {
+                  if (!elem) { return false; }
+                  if (elem.disabled) { return false; }
+                  if (elem.hasAttribute && elem.hasAttribute('disabled')) { return false; }
+                  const ariaDisabled = elem.getAttribute && elem.getAttribute('aria-disabled');
+                  if (ariaDisabled && ariaDisabled.toLowerCase() === 'true') { return false; }
+                  const fieldset = elem.closest ? elem.closest('fieldset') : null;
+                  if (fieldset && fieldset.disabled) { return false; }
+                  const style = window.getComputedStyle(elem);
+                  if (style && style.pointerEvents === 'none') { return false; }
+                  return true;
+                })(arguments[0]);
+            """
+            return bool(self._driver.execute_script(script, self))
+
+        @property
+        def text(self) -> str:
+            try:
+                value = self._element.text
+            except Exception:
+                value = ""
+            return value or ""
+
+        def send_keys(self, value: Any) -> None:
+            text = self._driver._format_keys(value)
+            if not text:
+                return
+            try:
+                self._element.input(text, clear=False)
+            except Exception:
+                self._driver.execute_script(
+                    "(function(elem, val) {"
+                    "  if (!elem) { return; }"
+                    "  if ('value' in elem) { elem.value += val; }"
+                    "  else { elem.innerText += val; }"
+                    "  elem.dispatchEvent(new Event('input', {bubbles: true}));"
+                    "  elem.dispatchEvent(new Event('change', {bubbles: true}));"
+                    "})(arguments[0], arguments[1]);",
+                    self,
+                    text,
+                )
+
+
+    class DrissionAlert:
+        def __init__(self, driver: "DrissionWebDriver"):
+            self._driver = driver
+
+        def accept(self) -> None:
+            self._driver._page.handle_alert(accept=True)
+
+        def dismiss(self) -> None:
+            self._driver._page.handle_alert(accept=False)
+
+
+    class DrissionSwitchTo:
+        def __init__(self, driver: "DrissionWebDriver"):
+            self._driver = driver
+
+        def window(self, handle: str) -> None:
+            self._driver._switch_window(handle)
+
+        def frame(self, frame_reference: DrissionElement) -> None:
+            if not isinstance(frame_reference, DrissionElement):
+                raise TypeError("frame reference must be a DrissionElement")
+            frame = frame_reference._element.get_frame()
+            if frame is None:
+                raise NoSuchElementException("Unable to switch to frame")
+            self._driver._frame_stack.append(frame)
+
+        def default_content(self) -> None:
+            self._driver._frame_stack.clear()
+
+        @property
+        def alert(self) -> DrissionAlert:
+            return DrissionAlert(self._driver)
+
+
+    class DrissionSelect:
+        def __init__(self, element: DrissionElement):
+            if element._element.tag != "select":
+                raise ValueError("DrissionSelect only supports <select> elements")
+            self._element = element
+
+        def _dispatch_change(self) -> None:
+            self._element._driver.execute_script(
+                "(function(elem) {"
+                "  if (!elem) { return; }"
+                "  elem.dispatchEvent(new Event('input', {bubbles: true}));"
+                "  elem.dispatchEvent(new Event('change', {bubbles: true}));"
+                "})(arguments[0]);",
+                self._element,
+            )
+
+        def select_by_value(self, value: str) -> None:
+            script = (
+                "return (function(elem, target) {"
+                "  if (!elem || !elem.options) { return false; }"
+                "  const options = Array.from(elem.options);"
+                "  const match = options.find(opt => opt.value === target);"
+                "  if (!match) { return false; }"
+                "  elem.value = match.value;"
+                "  return true;"
+                "})(arguments[0], arguments[1]);"
+            )
+            success = self._element._driver.execute_script(
+                script, self._element, value
+            )
+            if not success:
+                raise NoSuchElementException(
+                    f"Cannot locate option with value: {value}"
+                )
+            self._dispatch_change()
+
+        def select_by_visible_text(self, text: str) -> None:
+            script = (
+                "return (function(elem, label) {"
+                "  if (!elem || !elem.options) { return false; }"
+                "  const options = Array.from(elem.options);"
+                "  const match = options.find(opt => (opt.textContent || '').trim() === label.trim());"
+                "  if (!match) { return false; }"
+                "  elem.value = match.value;"
+                "  return true;"
+                "})(arguments[0], arguments[1]);"
+            )
+            success = self._element._driver.execute_script(
+                script, self._element, text
+            )
+            if not success:
+                raise NoSuchElementException(
+                    f"Cannot locate option with text: {text}"
+                )
+            self._dispatch_change()
+
+
+    class DrissionWebDriver:
+        def __init__(self, config_dict: dict):
+            if ChromiumPage is None or ChromiumOptions is None:
+                raise RuntimeError("DrissionPage is not installed")
+
+            self._config = config_dict
+            self._options = self._build_options(config_dict)
+            try:
+                self._page = ChromiumPage(addr_or_opts=self._options)
+            except FileNotFoundError as exc:
+                raise RuntimeError(
+                    "Unable to launch Chromium browser for DrissionPage. "
+                    "Please install Chrome or specify its path in the settings."
+                ) from exc
+            self._frame_stack: List["_ChromiumFrame"] = []
+            self.switch_to = DrissionSwitchTo(self)
+            self._script_timeout = None
+
+            self._page.add_init_js(
+                "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+            )
+
+        # ------------------------------------------------------------------
+        # helpers
+        # ------------------------------------------------------------------
+        def _build_options(self, config_dict: dict) -> ChromiumOptions:
+            opts = ChromiumOptions()
+            headless = bool(config_dict.get("advanced", {}).get("headless", False))
+            opts.headless(headless)
+            opts.set_argument("--disable-features=TranslateUI")
+            opts.set_argument("--disable-translate")
+            opts.set_argument("--disable-web-security")
+            opts.set_argument("--no-sandbox")
+            opts.set_argument("--disable-blink-features=AutomationControlled")
+            opts.set_argument("--password-store=basic")
+            lang = config_dict.get("language", "zh-TW")
+            opts.set_argument(f"--lang={lang}")
+            if not headless:
+                opts.set_argument("--start-maximized")
+            browser = config_dict.get("browser", "chrome")
+            if browser == "brave":
+                brave_path = get_brave_bin_path()
+                if brave_path and os.path.exists(brave_path):
+                    opts.set_browser_path(brave_path)
+            elif browser == "chrome":
+                chrome_path = config_dict.get("chrome_path")
+                if chrome_path and os.path.exists(chrome_path):
+                    opts.set_browser_path(chrome_path)
+            opts.set_pref("credentials_enable_service", False)
+            opts.set_pref("profile.password_manager_enabled", False)
+            opts.set_load_mode("eager")
+            return opts
+
+        def _current_context(self):
+            if self._frame_stack:
+                return self._frame_stack[-1]
+            return self._page
+
+        def _switch_window(self, handle: str) -> None:
+            if handle not in self.window_handles:
+                raise NoSuchWindowException(f"No window with handle {handle}")
+            self._page.activate_tab(handle)
+            self._frame_stack.clear()
+
+        def _translate_locator(self, by: str, value: str):
+            if by == By.CSS_SELECTOR:
+                return value
+            if by == By.ID:
+                return f"#{value}"
+            if by == By.NAME:
+                escaped = value.replace("'", "\\'")
+                return f"[name='{escaped}']"
+            if by == By.CLASS_NAME:
+                classes = ".".join(part for part in value.split() if part)
+                return f".{classes}" if classes else value
+            if by == By.TAG_NAME:
+                return value
+            if by == By.XPATH:
+                return ("xpath", value)
+            raise NotImplementedError(
+                f"By strategy {by} is not supported in drissionpage mode"
+            )
+
+        def _find_element(
+            self, by: str, value: str, base: Optional[DrissionElement] = None
+        ) -> DrissionElement:
+            locator = self._translate_locator(by, value)
+            timeout = None
+            if isinstance(locator, tuple):
+                query, selector = locator
+            else:
+                query, selector = None, locator
+            context = base._element if base is not None else self._current_context()
+            result = None
+            try:
+                if query:
+                    result = context.ele((query, selector), timeout=timeout)
+                else:
+                    result = context.ele(selector, timeout=timeout)
+            except Exception:
+                result = None
+            if result is None:
+                raise NoSuchElementException(
+                    f"No element found using locator ({by}, {value})"
+                )
+            return DrissionElement(self, result)
+
+        def _find_elements(
+            self, by: str, value: str, base: Optional[DrissionElement] = None
+        ) -> List[DrissionElement]:
+            locator = self._translate_locator(by, value)
+            context = base._element if base is not None else self._current_context()
+            if isinstance(locator, tuple):
+                query, selector = locator
+            else:
+                query, selector = None, locator
+            try:
+                if query:
+                    results = context.eles((query, selector), timeout=0)
+                else:
+                    results = context.eles(selector, timeout=0)
+            except Exception:
+                results = []
+            return [DrissionElement(self, item) for item in results or []]
+
+        def _unwrap_argument(self, value: Any) -> Any:
+            if isinstance(value, DrissionElement):
+                return value._element
+            return value
+
+        def _format_keys(self, value: Any) -> str:
+            if isinstance(value, str):
+                return value
+            if value == Keys.ENTER:
+                return "\r"
+            if value == Keys.END:
+                return "\uE010"
+            if isinstance(value, (list, tuple)):
+                return "".join(self._format_keys(v) for v in value)
+            return str(value)
+
+        def _press_and_hold(self, element: DrissionElement, seconds: float) -> None:
+            seconds = max(float(seconds), 0.2)
+            try:
+                rect = element._element.rect
+                x = float(rect.get("x", 0)) + float(rect.get("width", 0)) / 2
+                y = float(rect.get("y", 0)) + float(rect.get("height", 0)) / 2
+                self._page.run_cdp(
+                    "Input.dispatchMouseEvent",
+                    {
+                        "type": "mouseMoved",
+                        "x": x,
+                        "y": y,
+                        "buttons": 0,
+                    },
+                )
+                self._page.run_cdp(
+                    "Input.dispatchMouseEvent",
+                    {
+                        "type": "mousePressed",
+                        "x": x,
+                        "y": y,
+                        "button": "left",
+                        "clickCount": 1,
+                    },
+                )
+                time.sleep(seconds)
+                self._page.run_cdp(
+                    "Input.dispatchMouseEvent",
+                    {
+                        "type": "mouseReleased",
+                        "x": x,
+                        "y": y,
+                        "button": "left",
+                        "clickCount": 1,
+                    },
+                )
+            except Exception:
+                element.click()
+                time.sleep(seconds)
+
+        # ------------------------------------------------------------------
+        # webdriver-like interface
+        # ------------------------------------------------------------------
+        def get(self, url: str) -> None:
+            self._page.get(url)
+
+        def find_element(self, by: str, value: str) -> DrissionElement:
+            return self._find_element(by, value)
+
+        def find_elements(self, by: str, value: str) -> List[DrissionElement]:
+            return self._find_elements(by, value)
+
+        def execute_script(self, script: str, *args: Any) -> Any:
+            prepared_args = [self._unwrap_argument(arg) for arg in args]
+            wrapped = (
+                "return (function() {"
+                f"{script}"
+                "}).apply(null, arguments);"
+            )
+            context = self._current_context()
+            return context.run_js(wrapped, *prepared_args)
+
+        def close(self) -> None:
+            self._page.close()
+            self._frame_stack.clear()
+
+        def quit(self) -> None:
+            try:
+                self._page.quit()
+            finally:
+                self._frame_stack.clear()
+
+        def set_script_timeout(self, timeout: Any) -> None:
+            self._script_timeout = timeout
+
+        def get_log(self, *_args: Any, **_kwargs: Any) -> List[Any]:
+            return []
+
+        @property
+        def current_url(self) -> str:
+            try:
+                return self._current_context().url
+            except Exception:
+                return ""
+
+        @property
+        def current_window_handle(self) -> Optional[str]:
+            try:
+                return self._page.tab_id
+            except Exception:
+                return None
+
+        @property
+        def window_handles(self) -> List[str]:
+            try:
+                handles = list(self._page.tab_ids)
+            except Exception:
+                handles = []
+            return handles
+
+        @property
+        def switch_to_alert(self) -> DrissionAlert:
+            return DrissionAlert(self)
+
+else:
+
+    DrissionElement = None
+    DrissionAlert = None
+    DrissionSwitchTo = None
+    DrissionSelect = None
+    DrissionWebDriver = None
+
+
 def Select(element):
     if NodriverElement is not None and isinstance(element, NodriverElement):
         return NodriverSelect(element)
+    if DrissionElement is not None and isinstance(element, DrissionElement):
+        return DrissionSelect(element)
+
     if SeleniumSelect is None:
         raise RuntimeError("Selenium Select is unavailable")
     return SeleniumSelect(element)
@@ -759,6 +1271,11 @@ def _perform_press_and_hold(driver, element, hold_seconds: float) -> None:
     if NodriverElement is not None and isinstance(element, NodriverElement):
         driver._press_and_hold(element, hold_seconds)
         return
+
+    if DrissionElement is not None and isinstance(element, DrissionElement):
+        driver._press_and_hold(element, hold_seconds)
+        return
+
 
     actions = ActionChains(driver)
     actions.click_and_hold(element).pause(hold_seconds).release().perform()
@@ -1318,6 +1835,10 @@ def get_driver_by_config(config_dict):
         driver_type = config_dict.get("webdriver_type", CONST_WEBDRIVER_TYPE_SELENIUM)
         if driver_type == CONST_WEBDRIVER_TYPE_NODRIVER:
             driver = load_nodriver(config_dict)
+
+        elif driver_type == CONST_WEBDRIVER_TYPE_DRISSION:
+            driver = load_drissionpage(config_dict)
+
         elif driver_type == CONST_WEBDRIVER_TYPE_UC:
             # method 5: uc
             # multiprocessing not work bug.
@@ -1423,6 +1944,14 @@ def load_nodriver(config_dict):
     if NodriverWebDriver is None:
         raise RuntimeError("nodriver is required but is not available")
     return NodriverWebDriver(config_dict)
+
+
+
+def load_drissionpage(config_dict):
+    if DrissionWebDriver is None:
+        raise RuntimeError("DrissionPage is required but is not available")
+    return DrissionWebDriver(config_dict)
+
 
 def is_House_Rules_poped(driver):
     ret = False
