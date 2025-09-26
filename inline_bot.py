@@ -20,6 +20,9 @@ from selenium.common.exceptions import NoSuchWindowException
 from selenium.common.exceptions import UnexpectedAlertPresentException
 from selenium.common.exceptions import NoAlertPresentException
 from selenium.common.exceptions import WebDriverException
+
+from selenium.common.exceptions import NoSuchElementException
+
 from selenium import webdriver
 # for alert 2
 from selenium.webdriver.support.ui import WebDriverWait
@@ -762,58 +765,136 @@ def _perform_press_and_hold(driver, element, hold_seconds: float) -> None:
 
 
 def solve_press_and_hold_if_needed(driver, hold_seconds: float = 5.0) -> bool:
-    try:
-        script = """
-            (() => {
-              const markers = [
-                '按住不放',
-                '按著不放',
-                '按住確認',
-                '按住以確認',
-                'Press and hold',
-                'Hold to verify'
-              ];
-              const candidates = Array.from(document.querySelectorAll('button, [role="button"]'));
-              for (const el of document.querySelectorAll('[data-maxbot-press-hold]')) {
-                el.removeAttribute('data-maxbot-press-hold');
-              }
-              for (const el of candidates) {
-                const label = (el.innerText || el.textContent || '').trim();
-                if (!label) {
-                  continue;
-                }
-                if (markers.some((word) => label.includes(word))) {
-                  el.setAttribute('data-maxbot-press-hold', 'true');
-                  return true;
-                }
-              }
-              return false;
-            })()
-        """
-        found = driver.execute_script(script)
-    except Exception:
+
+    if driver is None:
         return False
 
-    if not found:
-        return False
+    marker_script = """
+        (() => {
+          const markers = [
+            '按住不放',
+            '按著不放',
+            '按住確認',
+            '按住以確認',
+            'Press and hold',
+            'Hold to verify'
+          ];
+          const candidates = Array.from(document.querySelectorAll('button, [role="button"]'));
+          for (const el of document.querySelectorAll('[data-maxbot-press-hold]')) {
+            el.removeAttribute('data-maxbot-press-hold');
+          }
+          for (const el of candidates) {
+            const label = (el.innerText || el.textContent || '').trim();
+            if (!label) {
+              continue;
+            }
+            if (markers.some((word) => label.includes(word))) {
+              el.setAttribute('data-maxbot-press-hold', 'true');
+              return true;
+            }
+          }
+          return false;
+        })()
+    """
 
-    try:
-        element = driver.find_element(
-            By.CSS_SELECTOR, "[data-maxbot-press-hold='true']"
+    cleanup_script = """
+        for (const el of document.querySelectorAll('[data-maxbot-press-hold]')) {
+          el.removeAttribute('data-maxbot-press-hold');
+        }
+    """
+
+    def _candidate_frames():
+        try:
+            frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
+        except Exception:
+            return []
+        keywords = (
+            "captcha",
+            "verify",
+            "verification",
+            "px-captcha",
+            "人類驗證",
+            "驗證挑戰",
         )
-    except Exception:
-        return False
+        filtered = []
+        for frame in frames:
+            try:
+                title = (frame.get_attribute("title") or "").lower()
+                src = (frame.get_attribute("src") or "").lower()
+            except Exception:
+                title = src = ""
+            text = f"{title} {src}"
+            if any(keyword in text for keyword in keywords):
+                filtered.append(frame)
+        return filtered or frames
 
-    try:
-        _perform_press_and_hold(driver, element, hold_seconds)
-        cleanup_script = """
-            const el = document.querySelector("[data-maxbot-press-hold='true']");
-            if (el) { el.removeAttribute('data-maxbot-press-hold'); }
-        """
-        driver.execute_script(cleanup_script)
-        return True
-    except Exception:
-        return False
+    contexts: List[Optional[Any]] = [None]
+    contexts.extend(_candidate_frames())
+
+    for frame in contexts:
+        element = None
+        try:
+            if frame is not None:
+                driver.switch_to.frame(frame)
+            try:
+                found = driver.execute_script(marker_script)
+            except Exception:
+                continue
+
+            if not found:
+                continue
+
+            try:
+                element = driver.find_element(
+                    By.CSS_SELECTOR, "[data-maxbot-press-hold='true']"
+                )
+            except NoSuchElementException:
+                element = None
+
+            if element is None:
+                try:
+                    driver.execute_script(cleanup_script)
+                except Exception:
+                    pass
+                continue
+
+            durations = [
+                max(hold_seconds, 0.8),
+                max(hold_seconds + 2.0, 3.0),
+                max(hold_seconds + 4.0, 6.0),
+            ]
+
+            success = False
+            for duration in durations:
+                try:
+                    _perform_press_and_hold(driver, element, duration)
+                except Exception:
+                    break
+                time.sleep(0.6)
+                try:
+                    element = driver.find_element(
+                        By.CSS_SELECTOR, "[data-maxbot-press-hold='true']"
+                    )
+                except NoSuchElementException:
+                    success = True
+                    break
+                except Exception:
+                    break
+            try:
+                driver.execute_script(cleanup_script)
+            except Exception:
+                pass
+
+            if success:
+                return True
+        finally:
+            try:
+                driver.switch_to.default_content()
+            except Exception:
+                pass
+
+    return False
+
 
 
 def get_app_root():
