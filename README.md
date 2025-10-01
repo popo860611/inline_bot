@@ -34,6 +34,13 @@ https://www.python.org/downloads/
 
 <code>python3 -m pip install selenium</code>
 
+若要使用 DrissionPage 版本的驅動，請另外安裝相依套件：
+
+<code>python3 -m pip install DrissionPage chromedriver-autoinstaller</code>
+
+DrissionPage 會以系統中的 Chrome/Brave 瀏覽器執行自動化。如果程式找不到瀏覽器，
+請在設定檔 `settings.json` 的 `chrome_path` 或 `browser` 參數中指定實際的執行檔路徑。
+
 3: run config interface:
 
 <code>python3 settings.py</code>
