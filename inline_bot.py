@@ -112,6 +112,52 @@ CONST_WEBDRIVER_TYPE_NODRIVER = "nodriver"
 
 CONST_WEBDRIVER_TYPE_DRISSION = "drissionpage"
 
+_LANGUAGE_ALIASES = {
+    "zh-tw": "zh-TW",
+    "zh_tw": "zh-TW",
+    "繁體中文": "zh-TW",
+    "繁體": "zh-TW",
+    "繁体中文": "zh-TW",
+    "zh-hant": "zh-TW",
+    "zh_cn": "zh-CN",
+    "zh-cn": "zh-CN",
+    "簡體中文": "zh-CN",
+    "简体中文": "zh-CN",
+    "簡體": "zh-CN",
+    "zh-hans": "zh-CN",
+    "ja": "ja-JP",
+    "ja_jp": "ja-JP",
+    "ja-jp": "ja-JP",
+    "日本語": "ja-JP",
+    "日文": "ja-JP",
+    "en": "en-US",
+    "english": "en-US",
+    "en_us": "en-US",
+    "en-us": "en-US",
+}
+
+
+def _resolve_browser_language(value: Any, default: str = "zh-TW") -> str:
+    if value is None:
+        return default
+    text = str(value).strip()
+    if not text:
+        return default
+    normalized = text.replace("_", "-")
+    key = normalized.lower()
+    if key in _LANGUAGE_ALIASES:
+        return _LANGUAGE_ALIASES[key]
+    if len(normalized) == 2 and normalized.isalpha():
+        return normalized.lower()
+    if (
+        len(normalized) >= 4
+        and "-" in normalized
+        and normalized.replace("-", "").isalpha()
+    ):
+        parts = normalized.split("-", 1)
+        return parts[0].lower() + "-" + parts[1].upper()
+    return default
+
 
 
 class Keys:
@@ -382,11 +428,7 @@ if nodriver is not None:
                 if os.path.exists(brave_path):
                     browser_path = brave_path
 
-            lang = "zh-TW"
-            try:
-                lang = config_dict.get("language", "zh-TW")
-            except Exception:
-                pass
+            lang = _resolve_browser_language(config_dict.get("language"))
 
             self._browser = self._run(
                 nodriver.start(
@@ -1010,8 +1052,9 @@ if ChromiumPage is not None:
             opts.set_argument("--no-sandbox")
             opts.set_argument("--disable-blink-features=AutomationControlled")
             opts.set_argument("--password-store=basic")
-            lang = config_dict.get("language", "zh-TW")
+            lang = _resolve_browser_language(config_dict.get("language"))
             opts.set_argument(f"--lang={lang}")
+            opts.set_pref("intl.accept_languages", lang)
             if not headless:
                 opts.set_argument("--start-maximized")
             browser = config_dict.get("browser", "chrome")
@@ -1490,7 +1533,13 @@ def get_brave_bin_path():
 
     return brave_path
 
-def get_chrome_options(webdriver_path, adblock_plus_enable, browser="chrome", headless = False):
+def get_chrome_options(
+    webdriver_path,
+    adblock_plus_enable,
+    browser="chrome",
+    headless=False,
+    language=None,
+):
     chrome_options = webdriver.ChromeOptions()
     if browser=="edge":
         chrome_options = webdriver.EdgeOptions()
@@ -1509,7 +1558,8 @@ def get_chrome_options(webdriver_path, adblock_plus_enable, browser="chrome", he
         chrome_options.add_argument('--headless=new')
     chrome_options.add_argument('--disable-features=TranslateUI')
     chrome_options.add_argument('--disable-translate')
-    chrome_options.add_argument('--lang=zh-TW')
+    lang = _resolve_browser_language(language)
+    chrome_options.add_argument(f'--lang={lang}')
     chrome_options.add_argument('--disable-web-security')
     chrome_options.add_argument("--no-sandbox");
 
@@ -1517,7 +1567,15 @@ def get_chrome_options(webdriver_path, adblock_plus_enable, browser="chrome", he
     chrome_options.add_experimental_option("excludeSwitches", ['enable-automation'])
     # Deprecated chrome option is ignored: useAutomationExtension
     #chrome_options.add_experimental_option('useAutomationExtension', False)
-    chrome_options.add_experimental_option("prefs", {"credentials_enable_service": False, "profile.password_manager_enabled": False, "translate":{"enabled": False}})
+    chrome_options.add_experimental_option(
+        "prefs",
+        {
+            "credentials_enable_service": False,
+            "profile.password_manager_enabled": False,
+            "translate": {"enabled": False},
+            "intl.accept_languages": lang,
+        },
+    )
 
     if browser=="brave":
         brave_path = get_brave_bin_path()
@@ -1556,7 +1614,13 @@ def load_chromdriver_normal(config_dict, driver_type):
         print(URL_CHROME_DRIVER)
     else:
         chrome_service = Service(chromedriver_path)
-        chrome_options = get_chrome_options(webdriver_path, config_dict["advanced"]["adblock_plus_enable"], browser=config_dict["browser"], headless=config_dict["advanced"]["headless"])
+        chrome_options = get_chrome_options(
+            webdriver_path,
+            config_dict["advanced"]["adblock_plus_enable"],
+            browser=config_dict["browser"],
+            headless=config_dict["advanced"]["headless"],
+            language=config_dict.get("language"),
+        )
         try:
             driver = webdriver.Chrome(service=chrome_service, options=chrome_options)
         except Exception as exc:
@@ -1583,12 +1647,24 @@ def load_chromdriver_normal(config_dict, driver_type):
                 install_chromedriver_binary(webdriver_path)
                 chrome_service = Service(chromedriver_path)
                 try:
-                    chrome_options = get_chrome_options(webdriver_path, config_dict["advanced"]["adblock_plus_enable"], browser=config_dict["browser"], headless=config_dict["advanced"]["headless"])
+                    chrome_options = get_chrome_options(
+                        webdriver_path,
+                        config_dict["advanced"]["adblock_plus_enable"],
+                        browser=config_dict["browser"],
+                        headless=config_dict["advanced"]["headless"],
+                        language=config_dict.get("language"),
+                    )
                     driver = webdriver.Chrome(service=chrome_service, options=chrome_options)
                 except Exception as exc2:
                     print("Selenium 4.11.0 Release with Chrome For Testing Browser.")
                     try:
-                        chrome_options = get_chrome_options(webdriver_path, config_dict["advanced"]["adblock_plus_enable"], browser=config_dict["browser"], headless=config_dict["advanced"]["headless"])
+                        chrome_options = get_chrome_options(
+                            webdriver_path,
+                            config_dict["advanced"]["adblock_plus_enable"],
+                            browser=config_dict["browser"],
+                            headless=config_dict["advanced"]["headless"],
+                            language=config_dict.get("language"),
+                        )
                         driver = webdriver.Chrome(service=Service(), options=chrome_options)
                     except Exception as exc3:
                         print(exc3)
@@ -1898,7 +1974,13 @@ def get_driver_by_config(config_dict):
             chromedriver_path = os.path.join(webdriver_path,"msedgedriver.exe")
 
         webdriver_service = Service(chromedriver_path)
-        chrome_options = get_chrome_options(webdriver_path, config_dict["advanced"]["adblock_plus_enable"], browser="edge", headless=config_dict["advanced"]["headless"])
+        chrome_options = get_chrome_options(
+            webdriver_path,
+            config_dict["advanced"]["adblock_plus_enable"],
+            browser="edge",
+            headless=config_dict["advanced"]["headless"],
+            language=config_dict.get("language"),
+        )
 
         driver = None
         try:
